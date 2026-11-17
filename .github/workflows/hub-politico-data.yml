@@ -1,99 +1,17 @@
-name: Build Hub Politico Data
+name: Hub Runner Smoke Test
 
 on:
   workflow_dispatch:
   push:
     branches:
       - data/hub-politico-runner
-    paths:
-      - '.github/workflows/hub-politico-data.yml'
-
-permissions:
-  contents: read
 
 jobs:
-  build:
+  smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
     steps:
-      - name: Checkout isolated branch
-        uses: actions/checkout@v4
-        with:
-          ref: data/hub-politico-runner
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Download audited bundle
-        shell: bash
+      - name: Echo
         run: |
-          set -euo pipefail
-          curl --fail --show-error --location --retry 5 --retry-all-errors \
-            https://paste.c-net.org/WorkshopPaisley -o bundle.b64
-          test "$(wc -c < bundle.b64)" -gt 500000
-          base64 --decode bundle.b64 | gzip --decompress > bundle.json
-          test "$(wc -c < bundle.json)" -gt 4000000
-
-      - name: Extract files and validate audit
-        shell: bash
-        run: |
-          set -euo pipefail
-          python - <<'PY'
-          import json
-          from pathlib import Path
-
-          obj = json.loads(Path('bundle.json').read_text(encoding='utf-8'))
-          files = obj.get('files', {})
-          if len(files) < 15:
-              raise SystemExit(f'Bundle incompleto: {len(files)} arquivos')
-          out = Path('data/generated')
-          out.mkdir(parents=True, exist_ok=True)
-          for name, content in files.items():
-              (out / name).write_text(content, encoding='utf-8')
-          audit = json.loads(files['auditoria.json'])
-          checks = audit.get('quality_checks', {})
-          failed = [k for k, v in checks.items() if not v]
-          if failed:
-              raise SystemExit(f'Falhas de auditoria: {failed}')
-          required = {
-              'pp_vereadores_selecionados_2024.csv',
-              'deputados_federais_municipio_2026.csv',
-              'deputados_federais_zona_2026.csv',
-              'mario_municipio_2026.csv',
-              'mario_zona_2026.csv',
-              'zucco_municipio_2026.csv',
-              'mario_secoes_prioritarias_2026.csv',
-              'matriz_municipal_ibge_tse.csv',
-              'instagram_publicacoes.csv',
-              'analise_secoes.json',
-              'analise_municipal.json',
-              'instagram_metricas_publicas.json',
-              'auditoria.json',
-          }
-          missing = sorted(required - set(files))
-          if missing:
-              raise SystemExit(f'Arquivos obrigatórios ausentes: {missing}')
-          print('Arquivos extraídos:', len(files))
-          print('Verificações:', checks)
-          for p in sorted(out.iterdir()):
-              print(p.name, p.stat().st_size)
-          PY
-
-      - name: Package generated data
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd data/generated
-          zip -9 -r ../../hub-politico-data.zip .
-          cd ../..
-          test "$(stat -c%s hub-politico-data.zip)" -gt 300000
-
-      - name: Upload dataset artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: hub-politico-data
-          path: hub-politico-data.zip
-          retention-days: 7
-          if-no-files-found: error
+          echo runner-ok
+          uname -a
+          python3 --version
