@@ -1,0 +1,64 @@
+name: Build Hub Politico Data
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - data/hub-politico-runner
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Checkout isolated branch
+        uses: actions/checkout@v4
+        with:
+          ref: data/hub-politico-runner
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Reconstruct and validate pipeline
+        shell: bash
+        run: |
+          mkdir -p scripts
+          cat compressed_pipeline/part_*.b64 | base64 --decode | xz --decompress > scripts/build_hub_data.py
+          test "$(sha256sum scripts/build_hub_data.py | cut -d' ' -f1)" = "f9243802b696b575b1ea864e18af87596c87976d04f59d5346567a1ba434b2f8"
+          python -m py_compile scripts/build_hub_data.py
+          wc -c scripts/build_hub_data.py
+
+      - name: Install runtime dependency
+        run: python -m pip install --upgrade requests
+
+      - name: Build audited electoral dataset
+        env:
+          PYTHONUNBUFFERED: '1'
+        run: python scripts/build_hub_data.py
+
+      - name: Archive outputs and diagnostics
+        if: always()
+        shell: bash
+        run: |
+          if [ -d data/generated ]; then
+            tar -czf hub-politico-data.tar.gz data/generated
+          else
+            mkdir -p diagnostic
+            cp -f scripts/build_hub_data.py diagnostic/ || true
+            find data -maxdepth 2 -type f -printf '%p\n' > diagnostic/files.txt 2>/dev/null || true
+            tar -czf hub-politico-data.tar.gz diagnostic data/raw 2>/dev/null || tar -czf hub-politico-data.tar.gz diagnostic
+          fi
+
+      - name: Upload dataset artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hub-politico-data
+          path: hub-politico-data.tar.gz
+          retention-days: 7
+          if-no-files-found: error
