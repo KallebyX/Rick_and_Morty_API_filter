@@ -1,64 +1,64 @@
-name: Build Hub Politico Data
+name: Import Hub Politico Data
 
 on:
-  workflow_dispatch:
   push:
     branches:
       - data/hub-politico-runner
+  workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  build:
+  import:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 20
     steps:
-      - name: Checkout isolated branch
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           ref: data/hub-politico-runner
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Reconstruct pipeline
-        shell: bash
-        run: |
-          mkdir -p scripts
-          cat compressed_pipeline/part_*.b64 | base64 --decode | xz --decompress > scripts/build_hub_data.py
-          sed -i 's/23f575a9a00a6b5ba8e607e55d05026e133840ce757bb23f88bc4014839a6aa8/e2dec50d027a7c1136e81f8e0f68f7ddf2bed66380a72a311c93300625bdbf74/g' scripts/build_hub_data.py
-          python -m py_compile scripts/build_hub_data.py
-          sha256sum scripts/build_hub_data.py
-
-      - name: Install runtime dependency
-        run: python -m pip install --upgrade requests
-
-      - name: Build audited electoral dataset
+      - name: Download audited package
         env:
-          PYTHONUNBUFFERED: '1'
-        run: python scripts/build_hub_data.py
-
-      - name: Archive outputs and diagnostics
-        if: always()
-        shell: bash
+          PACKAGE_URL: "https://t3.storageapi.dev/hub-politico-export-eyohmk/hub-politico-data-1794930323134.json.gz?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=tid_DbtwIbg_QjGXAjIPkoINxkxvKCSWYGsJoBSVZOGnBNCZIaPIiI%2F20261117%2Fsjc%2Fs3%2Faws4_request&X-Amz-Date=20261117T154523Z&X-Amz-Expires=86400&X-Amz-Signature=206e4260cab8b1d91ed6f2461812fa10d7cf00d6d481debf2c9a061892ad9773&X-Amz-SignedHeaders=host"
         run: |
-          if [ -d data/generated ]; then
-            tar -czf hub-politico-data.tar.gz data/generated
-          else
-            mkdir -p diagnostic
-            cp -f scripts/build_hub_data.py diagnostic/ || true
-            find data -maxdepth 2 -type f -printf '%p\n' > diagnostic/files.txt 2>/dev/null || true
-            tar -czf hub-politico-data.tar.gz diagnostic data/raw 2>/dev/null || tar -czf hub-politico-data.tar.gz diagnostic
-          fi
+          curl --fail --location --retry 4 --retry-all-errors "$PACKAGE_URL" -o hub-politico-data.json.gz
+          python - <<'PY'
+          import gzip, json, pathlib
+          out = pathlib.Path('data/generated')
+          out.mkdir(parents=True, exist_ok=True)
+          with gzip.open('hub-politico-data.json.gz', 'rt', encoding='utf-8') as fh:
+              package = json.load(fh)
+          for name, text in package['files'].items():
+              (out / name).write_text(text, encoding='utf-8')
+          print('files', len(package['files']))
+          print('bytes', sum((out / name).stat().st_size for name in package['files']))
+          PY
 
-      - name: Upload dataset artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: hub-politico-data
-          path: hub-politico-data.tar.gz
-          retention-days: 7
-          if-no-files-found: error
+      - name: Validate critical files
+        run: |
+          test -s data/generated/auditoria.json
+          test -s data/generated/mario_municipio_2026.csv
+          test -s data/generated/pp_vereadores_selecionados_2024.csv
+          test -s data/generated/deputados_federais_municipio_2026.csv
+          test -s data/generated/mario_secao_cruzado_2026.csv
+          python - <<'PY'
+          import json
+          a=json.load(open('data/generated/auditoria.json',encoding='utf-8'))
+          print(json.dumps(a.get('quality_checks',{}),ensure_ascii=False,indent=2))
+          failed=[k for k,v in a.get('quality_checks',{}).items() if not v]
+          if failed: raise SystemExit('failed checks: '+', '.join(failed))
+          PY
+
+      - name: Commit generated data
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add data/generated
+          if git diff --cached --quiet; then
+            echo 'No data changes.'
+          else
+            git commit -m 'data: importa base auditada do Hub Político [skip ci]'
+            git push origin HEAD:data/hub-politico-runner
+          fi
