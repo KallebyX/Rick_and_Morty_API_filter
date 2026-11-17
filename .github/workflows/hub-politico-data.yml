@@ -1,62 +1,69 @@
-name: Import Hub Politico Data
+name: Build Hub Politico Data
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - data/hub-politico-runner
-  workflow_dispatch:
+    paths:
+      - '.github/workflows/hub-politico-data.yml'
+      - 'compressed_pipeline/**'
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  import:
+  build:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 180
     steps:
-      - name: Checkout
+      - name: Checkout isolated branch
         uses: actions/checkout@v4
         with:
           ref: data/hub-politico-runner
 
-      - name: Download audited package
-        run: |
-          curl --fail --location --retry 4 --retry-all-errors "https://hub-data-download-production.up.railway.app/bundle.gz" -o hub-politico-data.json.gz
-          python - <<'PY'
-          import gzip, json, pathlib
-          out = pathlib.Path('data/generated')
-          out.mkdir(parents=True, exist_ok=True)
-          with gzip.open('hub-politico-data.json.gz', 'rt', encoding='utf-8') as fh:
-              package = json.load(fh)
-          for name, text in package['files'].items():
-              (out / name).write_text(text, encoding='utf-8')
-          print('files', len(package['files']))
-          print('bytes', sum((out / name).stat().st_size for name in package['files']))
-          PY
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
 
-      - name: Audit critical files
+      - name: Reconstruct and validate pipeline
+        shell: bash
         run: |
-          test -s data/generated/auditoria.json
-          test -s data/generated/mario_municipio_2026.csv
-          test -s data/generated/pp_vereadores_selecionados_2024.csv
-          test -s data/generated/deputados_federais_municipio_2026.csv
-          test -s data/generated/mario_secao_cruzado_2026.csv
-          python - <<'PY'
-          import json
-          a=json.load(open('data/generated/auditoria.json',encoding='utf-8'))
-          print(json.dumps(a.get('quality_checks',{}),ensure_ascii=False,indent=2))
-          failed=[k for k,v in a.get('quality_checks',{}).items() if not v]
-          print('quality_warnings', failed)
-          PY
+          set -euo pipefail
+          mkdir -p scripts
+          for f in compressed_pipeline/part_*.b64; do base64 --decode "$f"; done | xz --decompress > scripts/build_hub_data.py
+          python -m py_compile scripts/build_hub_data.py
+          sha256sum scripts/build_hub_data.py
+          wc -c scripts/build_hub_data.py
 
-      - name: Commit generated data
+      - name: Install runtime dependency
+        run: python -m pip install --upgrade requests
+
+      - name: Build audited electoral dataset
+        env:
+          PYTHONUNBUFFERED: '1'
+        run: python scripts/build_hub_data.py
+
+      - name: Archive outputs and diagnostics
+        if: always()
+        shell: bash
         run: |
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add data/generated
-          if git diff --cached --quiet; then
-            echo 'No data changes.'
+          set -euo pipefail
+          if [ -d data/generated ]; then
+            tar -czf hub-politico-data.tar.gz data/generated
           else
-            git commit -m 'data: importa base auditada do Hub Político [skip ci]'
-            git push origin HEAD:data/hub-politico-runner
+            mkdir -p diagnostic
+            cp -f scripts/build_hub_data.py diagnostic/ || true
+            find data -maxdepth 3 -type f -printf '%p\n' > diagnostic/files.txt 2>/dev/null || true
+            tar -czf hub-politico-data.tar.gz diagnostic data/raw 2>/dev/null || tar -czf hub-politico-data.tar.gz diagnostic
           fi
+
+      - name: Upload dataset artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hub-politico-data
+          path: hub-politico-data.tar.gz
+          retention-days: 7
+          if-no-files-found: error
